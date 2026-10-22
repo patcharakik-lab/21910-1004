@@ -187,6 +187,126 @@
     }
 
     // =========================================================================
+    // FIX V9: ASSET PATH RESOLVER & GITHUB PAGES REPAIR SYSTEM
+    // =========================================================================
+    const isDevMode = window.location.hostname === "localhost" ||
+                      window.location.hostname === "127.0.0.1" ||
+                      window.location.protocol === "file:" ||
+                      window.location.search.includes("dev=1") ||
+                      window.location.search.includes("debug=1");
+
+    /**
+     * Resolves the asset base URI safely across:
+     * - Local development (http://localhost/..., file:///)
+     * - GitHub Pages Project Site (https://<username>.github.io/<repo>/)
+     * - GitHub Pages User Site (https://<username>.github.io/)
+     * - Handles URL without trailing slash (e.g. /<repo> without /)
+     */
+    function getAssetBaseURI() {
+        if (window.__ASSET_BASE_URI__) {
+            return window.__ASSET_BASE_URI__;
+        }
+        const baseEl = document.querySelector('base[href]');
+        if (baseEl && baseEl.getAttribute('href')) {
+            return new URL(baseEl.getAttribute('href'), window.location.href).href;
+        }
+        let base = document.baseURI || window.location.href;
+        base = base.split('?')[0].split('#')[0];
+        if (base.endsWith('/')) {
+            return base;
+        }
+        if (/\.[a-zA-Z0-9]+$/.test(base)) {
+            return base.substring(0, base.lastIndexOf('/') + 1);
+        }
+        return base + '/';
+    }
+
+    /**
+     * Centralized Asset URL Resolver (FIX V9 Requirement 4)
+     * Strips leading slashes / dots to ensure correct repository subpath resolution.
+     */
+    function assetUrl(path) {
+        if (!path) return '';
+        if (path.startsWith('data:') || path.startsWith('blob:') || /^https?:\/\//i.test(path)) {
+            return path;
+        }
+        const cleanPath = path.replace(/^[\.\/]+/, '');
+        try {
+            return new URL(cleanPath, getAssetBaseURI()).href;
+        } catch (e) {
+            return cleanPath;
+        }
+    }
+    window.assetUrl = assetUrl;
+
+    /**
+     * Image Failure Fallback Handler (FIX V9 Requirement 7)
+     * Detects load failures, logs error, prevents broken layout, and preserves card UI.
+     */
+    function handleImageError(img) {
+        if (!img || img.dataset.fallbackApplied) return;
+        img.dataset.fallbackApplied = "true";
+
+        const rawSrc = img.getAttribute('src') || '';
+        const resolvedSrc = img.src || rawSrc;
+        const fileName = rawSrc.split('/').pop() || 'image';
+        const altText = img.getAttribute('alt') || 'ภาพประกอบการเรียนรู้';
+
+        console.warn(`[Asset Loader Error] Failed to load image: "${rawSrc}" (resolved: "${resolvedSrc}")`);
+
+        img.style.display = 'none';
+
+        const parent = img.parentElement;
+        if (parent && !parent.querySelector('.asset-fallback-card')) {
+            const fallback = document.createElement('div');
+            fallback.className = 'asset-fallback-card';
+            fallback.setAttribute('role', 'img');
+            fallback.setAttribute('aria-label', altText);
+
+            fallback.innerHTML = `
+                <div class="asset-fallback-inner">
+                    <i class="fa-solid fa-image asset-fallback-icon"></i>
+                    <span class="asset-fallback-title">${altText}</span>
+                    ${isDevMode ? `<span class="asset-fallback-dev">[Dev Notice: Missing "${fileName}"]</span>` : ''}
+                </div>
+            `;
+            parent.appendChild(fallback);
+        }
+    }
+    window.handleImageError = handleImageError;
+
+    function setupImageFallback(img) {
+        if (!img) return;
+        img.addEventListener('error', () => handleImageError(img), { once: true });
+    }
+
+    /**
+     * Scans container elements, resolves image URLs via assetUrl, and hooks fallback listeners.
+     */
+    function resolveContainerAssets(container = document) {
+        if (!container) return;
+        const images = container.querySelectorAll('img');
+        images.forEach((img) => {
+            const rawSrc = img.getAttribute('src');
+            if (rawSrc && !rawSrc.startsWith('data:') && !rawSrc.startsWith('blob:') && !/^https?:\/\//i.test(rawSrc)) {
+                const resolved = assetUrl(rawSrc);
+                if (img.src !== resolved) {
+                    img.src = resolved;
+                }
+            }
+            setupImageFallback(img);
+        });
+    }
+    window.resolveContainerAssets = resolveContainerAssets;
+
+    // Window capturing listener for failed images
+    window.addEventListener('error', function (event) {
+        if (event.target && event.target.tagName === 'IMG') {
+            handleImageError(event.target);
+        }
+    }, true);
+
+    // =========================================================================
     // 1. RENDER ALL SLIDES INTO DOM (1600x900 Canvas — V7 Design System)
     // =========================================================================
     function renderAllSlides() {
@@ -248,6 +368,8 @@
         });
 
         slideViewport.innerHTML = htmlFragments.join("");
+        resolveContainerAssets(slideViewport);
+        resolveContainerAssets(document.querySelector(".brand-info"));
     }
 
     // =========================================================================
@@ -787,6 +909,7 @@
     function prepareForPrint() {
         slideViewport.querySelectorAll(".reveal-card").forEach((card) => card.classList.add("revealed"));
         slideViewport.querySelectorAll("img[loading='lazy']").forEach((img) => img.removeAttribute("loading"));
+        resolveContainerAssets(slideViewport);
         if (slideScaleWrapper) {
             slideScaleWrapper.style.width = "1600px";
             slideScaleWrapper.style.height = "auto";
@@ -907,10 +1030,12 @@
         }
 
         urls.forEach((u) => {
-            if (u && !preloadedImages.has(u)) {
+            const resolved = assetUrl(u);
+            if (resolved && !preloadedImages.has(resolved)) {
                 const preImg = new Image();
-                preImg.src = u;
-                preloadedImages.add(u);
+                setupImageFallback(preImg);
+                preImg.src = resolved;
+                preloadedImages.add(resolved);
             }
         });
     }
@@ -1408,7 +1533,7 @@
                 badgeText: "บริการ &amp; ดูแลลูกค้า",
                 title: "6. ระบบบริการลูกค้า (Customer Service)",
                 desc: "ช่องทางให้คำแนะนำ ตอบคำถาม รับเรื่องร้องเรียน และแก้ไขปัญหาให้ลูกค้า เช่น <strong>แชตสด LINE Official Account หรือระบบตอบคำถามอัตโนมัติ</strong>",
-                imgSrc: "assets/images/student-bakery-packshot.jpg",
+                imgSrc: "assets/images/customer-service-chat.jpg",
                 caption: "การบริการและตอบแชตที่รวดเร็วช่วยสร้างความประทับใจและความเชื่อมั่น"
             }
         };
@@ -1435,7 +1560,9 @@
                 }
 
                 if (photoImg && item) {
-                    photoImg.src = item.imgSrc;
+                    photoImg.style.display = "";
+                    setupImageFallback(photoImg);
+                    photoImg.src = assetUrl(item.imgSrc);
                     photoImg.alt = item.title;
                 }
                 if (photoBadge && item) {
@@ -2424,6 +2551,99 @@
         return { allPassed, tests };
     };
 
+    // =========================================================================
+    // FIX V9: AUTOMATED ASSET LOADER & RESOLVER TEST SUITE
+    // =========================================================================
+    window.runAssetLoaderTest = function runAssetLoaderTest() {
+        const tests = [];
+
+        // 1. Resolver URL validation: relative path resolution
+        const testRel = assetUrl("assets/images/seller-packing-box.jpg");
+        const t1_ok = typeof testRel === "string" && testRel.includes("assets/images/seller-packing-box.jpg") && (/^https?:\/\//i.test(testRel) || /^file:\/\/\//i.test(testRel));
+        tests.push({
+            name: "Asset Resolver Relative Path Resolution",
+            passed: t1_ok,
+            details: { resolved: testRel }
+        });
+
+        // 2. Absolute path normalization (/assets/ -> resolved correctly without domain duplication)
+        const testLeading = assetUrl("/assets/images/seller-packing-box.jpg");
+        const t2_ok = typeof testLeading === "string" && testLeading.includes("assets/images/seller-packing-box.jpg") && !testLeading.includes("//assets/");
+        tests.push({
+            name: "Asset Resolver Absolute Path Normalization",
+            passed: t2_ok,
+            details: { resolved: testLeading }
+        });
+
+        // 3. Dot-relative path normalization (./assets/ -> resolved correctly)
+        const testDot = assetUrl("./assets/images/seller-packing-box.jpg");
+        const t3_ok = typeof testDot === "string" && testDot.includes("assets/images/seller-packing-box.jpg") && !testDot.includes("/./");
+        tests.push({
+            name: "Asset Resolver Dot Path Normalization",
+            passed: t3_ok,
+            details: { resolved: testDot }
+        });
+
+        // 4. Slide deck images resolution audit
+        const deckImgs = Array.from(slideViewport.querySelectorAll("img"));
+        let allSrcsValid = deckImgs.length > 0;
+        let brokenSrcs = [];
+        deckImgs.forEach((img) => {
+            const src = img.getAttribute("src") || "";
+            if (!src || src.startsWith("/") || src.includes("\\") || src.startsWith("blob:")) {
+                allSrcsValid = false;
+                brokenSrcs.push(src);
+            }
+        });
+        tests.push({
+            name: "Slide Deck Images (41) Clean Format Audit",
+            passed: allSrcsValid && deckImgs.length >= 41,
+            details: { count: deckImgs.length, brokenSrcs }
+        });
+
+        // 5. Image Fallback card simulation
+        const testContainer = document.createElement("div");
+        testContainer.style.position = "absolute";
+        testContainer.style.left = "-9999px";
+        document.body.appendChild(testContainer);
+
+        const dummyImg = document.createElement("img");
+        dummyImg.setAttribute("src", "assets/images/non-existent-test-image.jpg");
+        dummyImg.setAttribute("alt", "รูปภาพทดสอบกรณีขาดหาย");
+        testContainer.appendChild(dummyImg);
+        setupImageFallback(dummyImg);
+
+        handleImageError(dummyImg);
+
+        const fallbackEl = testContainer.querySelector(".asset-fallback-card");
+        const t5_ok = !!fallbackEl && dummyImg.style.display === "none";
+        document.body.removeChild(testContainer);
+
+        tests.push({
+            name: "Graceful Image Fallback Simulation",
+            passed: t5_ok,
+            details: { fallbackRendered: !!fallbackEl }
+        });
+
+        // 6. Before/After slide 8 images verification
+        const slide8 = slideViewport.querySelectorAll(".slide")[7];
+        let t6_ok = false;
+        if (slide8) {
+            const baImgs = slide8.querySelectorAll(".ba-image-stage img");
+            t6_ok = baImgs.length === 2 && Array.from(baImgs).every((im) => im.src && im.src.includes("assets/images/"));
+        }
+        tests.push({
+            name: "Before/After Dual Image Stage Audit",
+            passed: t6_ok
+        });
+
+        const allPassed = tests.every((t) => t.passed);
+        document.body.setAttribute("data-asset-test-passed", String(allPassed));
+        document.body.setAttribute("data-asset-test-results", JSON.stringify(tests));
+
+        return { allPassed, tests };
+    };
+
     const readyPromise = document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve();
     readyPromise.then(() => {
         fitAllSlidesTypography();
@@ -2439,6 +2659,7 @@
                 smartPaginateOverflowingSlides();
                 window.runSlideQualityAudit();
                 window.runBeforeAfterSliderTest();
+                window.runAssetLoaderTest();
             }, 50);
         });
     });
